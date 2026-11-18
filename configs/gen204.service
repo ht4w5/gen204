@@ -1,0 +1,73 @@
+# gen204 — fixed 204 No Content endpoint for RTT probes.
+#
+# Install
+# -------
+# 1. Build the CGO-free static binary (from the repo root):
+#
+#        make build
+#
+#    This writes ./build/gen204.
+#
+# 2. Install the binary:
+#
+#        install -m 0755 build/gen204 /usr/local/bin/gen204
+#
+# 3. Create the dedicated system user (no home, no login shell):
+#
+#        useradd --system --user-group --no-create-home \
+#                --shell /usr/sbin/nologin gen204
+#
+# 4. Install this unit:
+#
+#        install -m 0644 configs/gen204.service /etc/systemd/system/gen204.service
+#
+# 5. Enable and start:
+#
+#        systemctl daemon-reload
+#        systemctl enable --now gen204.service
+#
+#    Inspect with `systemctl status gen204.service`.
+#
+# Uninstall: `systemctl disable --now gen204.service`, then remove the unit
+# file and `/usr/local/bin/gen204`, and `userdel gen204` if no longer wanted.
+
+[Unit]
+Description=gen204 fixed 204 No Content endpoint for RTT probes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gen204
+Group=gen204
+
+# -listen is required. Adjust the bind address to control exposure
+# (e.g. 127.0.0.1:8080 to restrict to loopback).
+ExecStart=/usr/local/bin/gen204 -listen 0.0.0.0:8080
+
+# Optional traffic limit (204 Responses per second, aggregate across all
+# clients; fractional values allowed, 0 = unlimited). Throttling only ever
+# delays responses, never rejects them. Example:
+#ExecStart=/usr/local/bin/gen204 -listen 0.0.0.0:8080 -rate 10
+
+Restart=on-failure
+
+# Hardening: the service only accepts connections and writes fixed bytes;
+# it needs no filesystem, device, or privilege access. (For ports below
+# 1024, add AmbientCapabilities=CAP_NET_BIND_SERVICE.)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
