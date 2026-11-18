@@ -6,10 +6,14 @@
 
 **Status:** ready-for-agent
 
-- [ ] `make build` produces a CGO-free binary in the gitignored build directory; `make test` and `make clean` work
-- [ ] The binary listens on the address given via the listen flag and serves exactly one response per connection, then closes
-- [ ] The response bytes are byte-for-byte identical for an HTTP request, garbage input, a partial write, and an empty (immediate-close) connection
-- [ ] The response is the fixed 204 Response with no `Date` header and `Connection: close`, matching ADR-0001
-- [ ] Client request bytes are drained before responding; the probe observes the full response and clean EOF, never a reset
-- [ ] Behavior tests run through the single serve seam over loopback TCP with an ephemeral port, asserting only external behavior
-- [ ] Entrypoint stays thin: flag parsing and wiring only, all behavior testable in library packages
+- [x] `make build` produces a CGO-free binary in the gitignored build directory; `make test` and `make clean` work
+- [x] The binary listens on the address given via the listen flag and serves exactly one response per connection, then closes
+- [x] The response bytes are byte-for-byte identical for an HTTP request, garbage input, a partial write, and an empty (immediate-close) connection
+- [x] The response is the fixed 204 Response with no `Date` header and `Connection: close`, matching ADR-0001
+- [x] Client request bytes are drained before responding; the probe observes the full response and clean EOF, never a reset
+- [x] Behavior tests run through the single serve seam over loopback TCP with an ephemeral port, asserting only external behavior
+- [x] Entrypoint stays thin: flag parsing and wiring only, all behavior testable in library packages
+
+## Comments
+
+- Implemented on `ticket/01-fixed-204-response`. Serve seam: `server.Serve(ctx, l net.Listener) error` in `internal/server`; entrypoint `cmd/gen204` owns `net.Listen` and the `-listen` flag. All acceptance boxes verified (`make build`/`test`/`clean`, manual binary smoke test over raw sockets).
