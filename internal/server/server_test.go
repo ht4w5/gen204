@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -34,7 +35,7 @@ func startServerWithThrottle(t *testing.T, th *throttle.Throttle) string {
 		t.Fatalf("listen: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	ctx = server.WithThrottle(ctx, th)
+	ctx = throttle.InContext(ctx, th)
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(ctx, l) }()
 	t.Cleanup(func() {
@@ -51,35 +52,39 @@ func startServerWithThrottle(t *testing.T, th *throttle.Throttle) string {
 	return l.Addr().String()
 }
 
-// readToEnd reads until the server closes the connection and returns the
-// bytes it received. A clean close ends the read; a reset surfaces as an
-// error.
-func readToEnd(t *testing.T, c net.Conn) []byte {
-	t.Helper()
-	if err := c.SetReadDeadline(time.Now().Add(testTimeout)); err != nil {
-		t.Fatalf("set read deadline: %v", err)
+// exchange runs one raw-client round trip: it dials addr, hands the open
+// connection to send for writing, then reads until the server closes the
+// connection and returns the bytes. A reset surfaces as an error, as does
+// a response that does not arrive within timeout.
+func exchange(addr string, timeout time.Duration, send func(net.Conn) error) ([]byte, error) {
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	defer c.Close()
+	if err := send(c); err != nil {
+		return nil, fmt.Errorf("write: %w", err)
+	}
+	if err := c.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("set read deadline: %w", err)
 	}
 	got, err := io.ReadAll(c)
 	if err != nil {
-		t.Fatalf("read response: %v", err)
+		return nil, fmt.Errorf("read response: %w", err)
 	}
-	return got
+	return got, nil
 }
 
 func TestServeRespondsWith204ResponseToHTTPRequest(t *testing.T) {
 	addr := startServer(t)
 
-	c, err := net.Dial("tcp", addr)
+	got, err := exchange(addr, testTimeout, func(c net.Conn) error {
+		_, err := io.WriteString(c, "GET /index.html HTTP/1.1\r\nHost: example.test\r\n\r\n")
+		return err
+	})
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Fatalf("probe: %v", err)
 	}
-	defer c.Close()
-
-	if _, err := io.WriteString(c, "GET /index.html HTTP/1.1\r\nHost: example.test\r\n\r\n"); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	got := readToEnd(t, c)
 	if string(got) != want204Response {
 		t.Errorf("response = %q, want %q", got, want204Response)
 	}
@@ -115,22 +120,17 @@ func TestServeSendsIdentical204ResponseForAnyInput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			addr := startServer(t)
 
-			c, err := net.Dial("tcp", addr)
-			if err != nil {
-				t.Fatalf("dial: %v", err)
-			}
-			defer c.Close()
-
-			if len(tt.input) > 0 {
-				if _, err := c.Write(tt.input); err != nil {
-					t.Fatalf("write input: %v", err)
+			got, err := exchange(addr, testTimeout, func(c net.Conn) error {
+				if len(tt.input) > 0 {
+					if _, err := c.Write(tt.input); err != nil {
+						return err
+					}
 				}
+				return c.(*net.TCPConn).CloseWrite()
+			})
+			if err != nil {
+				t.Fatalf("probe: %v", err)
 			}
-			if err := c.(*net.TCPConn).CloseWrite(); err != nil {
-				t.Fatalf("close write side: %v", err)
-			}
-
-			got := readToEnd(t, c)
 			if string(got) != want204Response {
 				t.Errorf("response = %q, want %q", got, want204Response)
 			}
@@ -141,22 +141,20 @@ func TestServeSendsIdentical204ResponseForAnyInput(t *testing.T) {
 func TestServeDrainsClientBytesBeforeResponding(t *testing.T) {
 	addr := startServer(t)
 
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer c.Close()
-
 	// Write the request head in chunks with the terminator split across
 	// writes, and never close the write side: the response must still
-	// arrive, and the close must be clean (readToEnd fails on a reset).
-	for _, chunk := range []string{"POST /probe HTTP/1.1\r\n", "Host: example.test\r\n", "\r", "\n"} {
-		if _, err := io.WriteString(c, chunk); err != nil {
-			t.Fatalf("write request chunk: %v", err)
+	// arrive, and the close must be clean (a reset surfaces as an error).
+	got, err := exchange(addr, testTimeout, func(c net.Conn) error {
+		for _, chunk := range []string{"POST /probe HTTP/1.1\r\n", "Host: example.test\r\n", "\r", "\n"} {
+			if _, err := io.WriteString(c, chunk); err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("probe: %v", err)
 	}
-
-	got := readToEnd(t, c)
 	if string(got) != want204Response {
 		t.Errorf("response = %q, want %q", got, want204Response)
 	}
@@ -165,36 +163,6 @@ func TestServeDrainsClientBytesBeforeResponding(t *testing.T) {
 func TestServeAnswersConcurrentConnectionsIdentically(t *testing.T) {
 	addr := startServer(t)
 
-	const dialers = 3
-	results := make(chan string, dialers)
-	for range dialers {
-		go func() {
-			c, err := net.Dial("tcp", addr)
-			if err != nil {
-				results <- "dial failed: " + err.Error()
-				return
-			}
-			defer c.Close()
-			if _, err := io.WriteString(c, "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n"); err != nil {
-				results <- "write failed: " + err.Error()
-				return
-			}
-			if err := c.SetReadDeadline(time.Now().Add(testTimeout)); err != nil {
-				results <- "set deadline failed: " + err.Error()
-				return
-			}
-			got, err := io.ReadAll(c)
-			if err != nil {
-				results <- "read failed: " + err.Error()
-				return
-			}
-			results <- string(got)
-		}()
-	}
-
-	for range dialers {
-		if got := <-results; got != want204Response {
-			t.Errorf("response = %q, want %q", got, want204Response)
-		}
-	}
+	results := runProbes(t, addr, 3)
+	checkResponses(t, results)
 }

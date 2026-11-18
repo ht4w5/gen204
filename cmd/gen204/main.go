@@ -14,12 +14,16 @@ import (
 )
 
 func main() {
-	listen := flag.String("listen", ":8080", "listen address (host:port)")
+	listen := flag.String("listen", "", "listen address (host:port)")
 	rate := flag.Float64("rate", 0, "traffic limit in responses per second (0 = unlimited)")
 	flag.Parse()
 
-	// Validate the traffic limit before listening, so a bad -rate fails
-	// fast instead of leaving a misbehaving server behind.
+	// Misconfiguration fails fast: a missing -listen or a bad -rate
+	// exits before anything is bound.
+	if *listen == "" {
+		fmt.Fprintln(os.Stderr, "gen204: -listen is required (host:port)")
+		os.Exit(1)
+	}
 	th, err := throttle.New(*rate)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gen204:", err)
@@ -31,7 +35,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gen204:", err)
 		os.Exit(1)
 	}
-	ctx := server.WithThrottle(context.Background(), th)
+	ctx := throttle.InContext(context.Background(), th)
 	if err := server.Serve(ctx, l); err != nil {
 		fmt.Fprintln(os.Stderr, "gen204:", err)
 		os.Exit(1)

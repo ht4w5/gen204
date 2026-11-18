@@ -17,32 +17,25 @@ const probeTimeout = 30 * time.Second
 
 // probeResult is what one raw client observed: the exact bytes it
 // received and when its response arrived, measured from the test's
-// start. A non-empty err records a client-side failure.
+// start. A non-nil err records a client-side failure.
 type probeResult struct {
 	response string
 	arrived  time.Duration
-	err      string
+	err      error
 }
 
 // probe dials one connection, sends a plain request, and records what
 // came back. A throttled probe blocks until its response slot opens.
 func probe(addr string, start time.Time) probeResult {
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		return probeResult{err: "dial: " + err.Error()}
-	}
-	defer c.Close()
-	if _, err := io.WriteString(c, "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n"); err != nil {
-		return probeResult{err: "write: " + err.Error()}
-	}
-	if err := c.SetReadDeadline(time.Now().Add(probeTimeout)); err != nil {
-		return probeResult{err: "set deadline: " + err.Error()}
-	}
-	got, err := io.ReadAll(c)
-	if err != nil {
-		return probeResult{err: "read: " + err.Error()}
-	}
-	return probeResult{response: string(got), arrived: time.Since(start)}
+	got, err := exchange(addr, probeTimeout, sendProbeRequest)
+	return probeResult{response: string(got), arrived: time.Since(start), err: err}
+}
+
+// sendProbeRequest writes one plain request head, the way an RTT probe
+// does.
+func sendProbeRequest(c net.Conn) error {
+	_, err := io.WriteString(c, "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+	return err
 }
 
 // runProbes dials n connections concurrently and returns what each
@@ -68,8 +61,8 @@ func runProbes(t *testing.T, addr string, n int) []probeResult {
 func checkResponses(t *testing.T, results []probeResult) {
 	t.Helper()
 	for i, r := range results {
-		if r.err != "" {
-			t.Errorf("probe %d: %s", i, r.err)
+		if r.err != nil {
+			t.Errorf("probe %d: %v", i, r.err)
 			continue
 		}
 		if r.response != want204Response {
@@ -100,6 +93,24 @@ func spanFor(n int, rate float64) time.Duration {
 	return time.Duration(float64(n-1) / rate * float64(time.Second))
 }
 
+// checkPacing asserts the arrivals honor the traffic limit: the
+// responses span at least 0.9×(n-1)/rate seconds — one response slot per
+// 1/rate seconds, no burst allowance — and the last arrives within
+// upper× that span of the start. The 0.9 factor keeps the lower bound
+// tolerant of arrival jitter; upper is generous: throttling may only
+// delay, never stall.
+func checkPacing(t *testing.T, results []probeResult, rate, upper float64) {
+	t.Helper()
+	earliest, latest := arrivalSpan(results)
+	wantSpan := spanFor(len(results), rate)
+	if span := latest - earliest; span < wantSpan*9/10 {
+		t.Errorf("responses span %v, want at least %v (0.9 * %v pacing bound)", span, wantSpan*9/10, wantSpan)
+	}
+	if max := time.Duration(upper * float64(wantSpan)); latest > max {
+		t.Errorf("latest response arrived after %v, want at most %v (%g * %v pacing bound)", latest, max, upper, wantSpan)
+	}
+}
+
 func TestTrafficLimitPacesConcurrentProbesSmoothly(t *testing.T) {
 	const rate = 4.0 // responses per second
 	const probes = 5
@@ -112,19 +123,10 @@ func TestTrafficLimitPacesConcurrentProbesSmoothly(t *testing.T) {
 	results := runProbes(t, addr, probes)
 	checkResponses(t, results)
 
-	earliest, latest := arrivalSpan(results)
 	// N probes at a limit of R span ~(N-1)/R seconds: one response slot
 	// per 1/R seconds with no burst allowance, even though the server
-	// had been idle. The 0.9 factor keeps the bound tolerant of client-
-	// side arrival jitter.
-	wantSpan := spanFor(probes, rate)
-	if span := latest - earliest; span < wantSpan*9/10 {
-		t.Errorf("responses span %v, want at least %v (0.9 * %v pacing bound)", span, wantSpan*9/10, wantSpan)
-	}
-	// Generous upper bound: throttling may only delay, never stall.
-	if latest > 5*wantSpan {
-		t.Errorf("latest response arrived after %v, want at most %v (generous)", latest, 5*wantSpan)
-	}
+	// had been idle.
+	checkPacing(t, results, rate, 5)
 }
 
 func TestTrafficLimitCapsSequentialProbesToTheCeiling(t *testing.T) {
@@ -143,17 +145,9 @@ func TestTrafficLimitCapsSequentialProbesToTheCeiling(t *testing.T) {
 	}
 	checkResponses(t, results)
 
-	earliest, latest := arrivalSpan(results)
 	// One client probing one after another is still held to the same
 	// ceiling: N responses at a limit of R span ~(N-1)/R seconds.
-	wantSpan := spanFor(probes, rate)
-	if span := latest - earliest; span < wantSpan*9/10 {
-		t.Errorf("responses span %v, want at least %v (0.9 * %v pacing bound)", span, wantSpan*9/10, wantSpan)
-	}
-	// Generous upper bound: throttling may only delay, never stall.
-	if latest > 5*wantSpan {
-		t.Errorf("latest response arrived after %v, want at most %v (generous)", latest, 5*wantSpan)
-	}
+	checkPacing(t, results, rate, 5)
 }
 
 func TestTrafficLimitHonorsFractionalRates(t *testing.T) {
@@ -168,17 +162,10 @@ func TestTrafficLimitHonorsFractionalRates(t *testing.T) {
 	results := runProbes(t, addr, probes)
 	checkResponses(t, results)
 
-	earliest, latest := arrivalSpan(results)
-	wantSpan := spanFor(probes, rate) // 1.6s
-	if span := latest - earliest; span < wantSpan*9/10 {
-		t.Errorf("responses span %v, want at least %v (0.9 * %v pacing bound)", span, wantSpan*9/10, wantSpan)
-	}
 	// The upper bound is where fractional rates prove themselves: a
 	// floor to whole responses per second would pace at 1/s and take
-	// 4s, well past the bound.
-	if latest > 2*wantSpan {
-		t.Errorf("latest response arrived after %v, want at most %v (2 * %v pacing bound)", latest, 2*wantSpan, wantSpan)
-	}
+	// 4s, well past the 2× bound.
+	checkPacing(t, results, rate, 2)
 }
 
 func TestThrottledProbesAreDelayedNotRejected(t *testing.T) {
@@ -195,17 +182,9 @@ func TestThrottledProbesAreDelayedNotRejected(t *testing.T) {
 	// shed — even though most probes have to wait for a slot.
 	checkResponses(t, results)
 
-	earliest, latest := arrivalSpan(results)
 	// Delayed, not rejected: the probes must actually have been held
 	// back by throttling before their responses went out.
-	wantSpan := spanFor(probes, rate) // 1.67s
-	if span := latest - earliest; span < wantSpan*9/10 {
-		t.Errorf("responses span %v, want at least %v (0.9 * %v pacing bound)", span, wantSpan*9/10, wantSpan)
-	}
-	// Generous upper bound: a throttled response is late, not lost.
-	if latest > 5*wantSpan {
-		t.Errorf("latest response arrived after %v, want at most %v (generous)", latest, 5*wantSpan)
-	}
+	checkPacing(t, results, rate, 5)
 }
 
 func TestTrafficLimitKeepsAcceptingWhileProbesWait(t *testing.T) {
@@ -242,26 +221,17 @@ func TestTrafficLimitKeepsAcceptingWhileProbesWait(t *testing.T) {
 
 	// 29 connections under one aggregate budget, none capped or shed.
 	checkResponses(t, results)
-
-	earliest, latest := arrivalSpan(results)
-	wantSpan := spanFor(waiting+late, rate) // 1.4s
-	if span := latest - earliest; span < wantSpan*9/10 {
-		t.Errorf("responses span %v, want at least %v (0.9 * %v pacing bound)", span, wantSpan*9/10, wantSpan)
-	}
-	// Generous upper bound: throttling may only delay, never stall.
-	if latest > 5*wantSpan {
-		t.Errorf("latest response arrived after %v, want at most %v (generous)", latest, 5*wantSpan)
-	}
+	checkPacing(t, results, rate, 5)
 }
 
 func TestTrafficLimitOfZeroIsUnlimited(t *testing.T) {
 	tests := []struct {
-		name      string
-		newPacerN func(t *testing.T) *throttle.Throttle
+		name        string
+		newThrottle func(t *testing.T) *throttle.Throttle
 	}{
 		{
 			name: "zero rate",
-			newPacerN: func(t *testing.T) *throttle.Throttle {
+			newThrottle: func(t *testing.T) *throttle.Throttle {
 				th, err := throttle.New(0)
 				if err != nil {
 					t.Fatalf("New(0): %v", err)
@@ -270,14 +240,14 @@ func TestTrafficLimitOfZeroIsUnlimited(t *testing.T) {
 			},
 		},
 		{
-			name:      "no traffic limit at all",
-			newPacerN: func(t *testing.T) *throttle.Throttle { return nil },
+			name:        "no traffic limit at all",
+			newThrottle: func(t *testing.T) *throttle.Throttle { return nil },
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			addr := startServerWithThrottle(t, tt.newPacerN(t))
+			addr := startServerWithThrottle(t, tt.newThrottle(t))
 
 			results := runProbes(t, addr, 8)
 			checkResponses(t, results)

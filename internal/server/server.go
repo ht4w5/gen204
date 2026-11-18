@@ -24,23 +24,12 @@ var requestTerminator = []byte("\r\n\r\n")
 // connection before responding anyway.
 const drainCap = 8 << 10
 
-// throttleKey carries the aggregate traffic limit through the serve
-// context.
-type throttleKey struct{}
-
-// WithThrottle returns a copy of ctx whose Serve holds every 204
-// Response until t releases a response slot — the traffic limit's
-// throttling. A nil t, or a context without one, serves with no traffic
-// limit.
-func WithThrottle(ctx context.Context, t *throttle.Throttle) context.Context {
-	return context.WithValue(ctx, throttleKey{}, t)
-}
-
 // Serve accepts connections on l and answers each one with a single 204
 // Response followed by a close. It serves until ctx is cancelled or Accept
-// fails; on cancellation Serve closes l and returns nil.
+// fails; on cancellation Serve closes l and returns nil. A Throttle
+// carried by ctx throttles the responses (see throttle.InContext).
 func Serve(ctx context.Context, l net.Listener) error {
-	th, _ := ctx.Value(throttleKey{}).(*throttle.Throttle)
+	th := throttle.FromContext(ctx)
 	served := make(chan struct{})
 	defer close(served)
 	go func() {
@@ -62,19 +51,21 @@ func Serve(ctx context.Context, l net.Listener) error {
 	}
 }
 
-// serveConn drains the client's bytes, waits for the traffic limit to
-// release a response slot (throttling), and then sends the 204 Response.
+// serveConn drains the client's bytes, then writes the 204 Response
+// inside the throttle's slot — throttling delays the write, never drops
+// it, and the next slot opens after this emission actually happened.
 func serveConn(c net.Conn, th *throttle.Throttle) {
 	defer c.Close()
 	drain(c)
-	if th != nil {
-		th.Wait()
-	}
-	c.Write(response204)
+	th.Do(func() error {
+		_, err := c.Write(response204)
+		return err
+	})
 }
 
-// drain reads and discards client bytes until the request terminator, the
-// byte cap, or a read error (including EOF) — never parsing.
+// drain reads and discards client bytes — never parsing — until the
+// request terminator, the byte cap, or EOF. A client that holds its
+// write side open without a terminator waits here.
 func drain(c net.Conn) {
 	buf := make([]byte, 1024)
 	var drained []byte
