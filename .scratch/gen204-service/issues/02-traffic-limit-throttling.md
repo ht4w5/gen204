@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Fixed 204 Response for every connection
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] With a traffic limit of N per second, aggregate output across concurrent connections never exceeds the ceiling, enforced smoothly (no burst)
 - [x] Throttled probes are delayed, not rejected: every connection still receives its 204 Response
@@ -16,4 +16,9 @@
 
 ## Comments
 
-- Implemented on `ticket/02-traffic-limit-throttling`. Throttle package: `throttle.New(rate)` (negative/NaN rejected, `0` = unlimited) and `(*Throttle).Wait()` — a smooth slot reservation (one response slot per 1/N s, no burst, one aggregate budget). The server seam is unchanged: `server.Serve(ctx, net.Listener) error`, with the pacer carried via `server.WithThrottle(ctx, th)`; `serveConn` throttles after drain and before writing the 204 Response. Entrypoint adds the float `-rate` flag and validates it via `throttle.New` before `net.Listen`. Throttle tests go through the serve seam over loopback TCP with real time and tolerant bounds (0.9× lower pacing bounds, generous upper bounds). The negative-rate checkbox is covered by a test that runs the built binary against an already-bound address, proving the error surfaces before any listen attempt.
+- Implemented on `ticket/02-traffic-limit-throttling`. Throttle package: `throttle.New(rate)` (negative/NaN rejected, `0` = unlimited) and a smooth slot reservation (one response slot per 1/N s, no burst, one aggregate budget). The server seam is unchanged: `server.Serve(ctx, net.Listener) error`; `serveConn` throttles after drain and before writing the 204 Response. Entrypoint adds the float `-rate` flag and validates it via `throttle.New` before `net.Listen`. Throttle tests go through the serve seam over loopback TCP with real time and tolerant bounds (0.9× lower pacing bounds, generous upper bounds). The negative-rate checkbox is covered by a test that runs the built binary against an already-bound address, proving the error surfaces before any listen attempt.
+- Code-review fix pass (see `fix/code-review-fixes`): pacing now tied to actual emission (`Throttle.Do(f)` serializes sleep→write, next slot from actual emission time), so the ceiling holds in any window even under scheduler oversleep; throttle travels via `throttle.InContext`/`FromContext` so `internal/server` exports only `Serve`; off-seam `throttle.New` unit test removed in favor of binary-level coverage.
+
+## Answer
+
+Resolved on integration branch `integration/gen204-service` (commit `0f6bd5d`, "feat(throttle): global traffic limit with throttling"; review fixes `0bb532d`). All acceptance boxes checked and verified: aggregate smooth traffic limit (no burst, consecutive 204 Responses ≥ 1/N s apart), throttling delays but never sheds, one shared budget across all clients, uncapped waiting connections with the accept loop never blocked, fractional rates honored, absent/`0` unlimited, negative rate exits with a clear error before listening. Throttle tests use the serve seam over loopback TCP with tolerant real-time bounds only.

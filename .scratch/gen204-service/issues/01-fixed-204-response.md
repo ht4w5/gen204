@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] `make build` produces a CGO-free binary in the gitignored build directory; `make test` and `make clean` work
 - [x] The binary listens on the address given via the listen flag and serves exactly one response per connection, then closes
@@ -17,3 +17,8 @@
 ## Comments
 
 - Implemented on `ticket/01-fixed-204-response`. Serve seam: `server.Serve(ctx, l net.Listener) error` in `internal/server`; entrypoint `cmd/gen204` owns `net.Listen` and the `-listen` flag. All acceptance boxes verified (`make build`/`test`/`clean`, manual binary smoke test over raw sockets).
+- Code-review fix pass (see `fix/code-review-fixes`): `-listen` is now required (no all-interfaces default, story 18), test helpers deduplicated.
+
+## Answer
+
+Resolved on integration branch `integration/gen204-service` (commit `f4a56db`, "feat(server): fixed 204 Response for every connection"; review fixes `0bb532d`). All acceptance boxes checked and verified: fixed ADR-0001 204 Response bytes, drain-then-respond, one response per connection, serve seam `server.Serve(ctx, net.Listener) error` in `internal/server` (its only export), thin `cmd/gen204` entrypoint with required `-listen` flag, Makefile `build`/`test`/`clean` with CGO-free static binary into gitignored `build/`. Tests assert external behavior only, over loopback TCP.

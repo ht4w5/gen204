@@ -1,6 +1,6 @@
 # Spec: gen204 service
 
-Status: ready-for-agent
+Status: resolved
 
 ## Problem Statement
 
@@ -78,3 +78,7 @@ gen204 is a small Go service that answers every connection with one byte-identic
 - ADR-0001 (TCP-level HTTP without net/http) records the deliberate deviations: no `Date`, close-per-connection, drain-before-respond. Do not "fix" these.
 - Glossary vocabulary applies: the fixed reply is the **204 Response**; the ceiling is the **traffic limit** (never "rate limit" in docs or identifiers); overload behavior is **throttling**, never shedding; the service's consumers are **RTT probes**.
 - The whole point of the service is measurement purity: any future change that adds per-response variability (dynamic headers, variable server work, keep-alive) defeats its purpose and needs a new ADR at minimum.
+
+## Comments
+
+- Implemented in full on integration branch `integration/gen204-service` (tickets 01 and 02 resolved there; code-review fix pass on both axes merged as `0bb532d`). Follow-up: `.scratch/gen204-service/issues/03-partial-input-drain-contract.md` records the one open spec tension (story 5 vs. the drain contract for a client that holds its write side open).
