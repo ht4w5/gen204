@@ -6,10 +6,14 @@
 
 **Status:** ready-for-agent
 
-- [ ] With a traffic limit of N per second, aggregate output across concurrent connections never exceeds the ceiling, enforced smoothly (no burst)
-- [ ] Throttled probes are delayed, not rejected: every connection still receives its 204 Response
-- [ ] Concurrent dialers share one aggregate budget rather than getting per-client budgets
-- [ ] Connections waiting for budget are not capped; the service keeps accepting while throttled
-- [ ] Fractional rates (e.g. `2.5`) are honored; absent or `0` produces no measurable pacing (unlimited)
-- [ ] A negative rate exits with a clear error before listening
-- [ ] Throttle tests use the serve seam over loopback TCP with tolerant real-time bounds (lower bounds proving pacing, generous upper bounds) — never tick-exact assertions
+- [x] With a traffic limit of N per second, aggregate output across concurrent connections never exceeds the ceiling, enforced smoothly (no burst)
+- [x] Throttled probes are delayed, not rejected: every connection still receives its 204 Response
+- [x] Concurrent dialers share one aggregate budget rather than getting per-client budgets
+- [x] Connections waiting for budget are not capped; the service keeps accepting while throttled
+- [x] Fractional rates (e.g. `2.5`) are honored; absent or `0` produces no measurable pacing (unlimited)
+- [x] A negative rate exits with a clear error before listening
+- [x] Throttle tests use the serve seam over loopback TCP with tolerant real-time bounds (lower bounds proving pacing, generous upper bounds) — never tick-exact assertions
+
+## Comments
+
+- Implemented on `ticket/02-traffic-limit-throttling`. Throttle package: `throttle.New(rate)` (negative/NaN rejected, `0` = unlimited) and `(*Throttle).Wait()` — a smooth slot reservation (one response slot per 1/N s, no burst, one aggregate budget). The server seam is unchanged: `server.Serve(ctx, net.Listener) error`, with the pacer carried via `server.WithThrottle(ctx, th)`; `serveConn` throttles after drain and before writing the 204 Response. Entrypoint adds the float `-rate` flag and validates it via `throttle.New` before `net.Listen`. Throttle tests go through the serve seam over loopback TCP with real time and tolerant bounds (0.9× lower pacing bounds, generous upper bounds). The negative-rate checkbox is covered by a test that runs the built binary against an already-bound address, proving the error surfaces before any listen attempt.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ht4w5/gen204/internal/server"
+	"github.com/ht4w5/gen204/internal/throttle"
 )
 
 // want204Response is the fixed 204 Response defined by ADR-0001: a 204
@@ -21,11 +22,19 @@ const testTimeout = 2 * time.Second
 // when the test ends.
 func startServer(t *testing.T) string {
 	t.Helper()
+	return startServerWithThrottle(t, nil)
+}
+
+// startServerWithThrottle is startServer with the aggregate traffic
+// limit th in effect (nil: no traffic limit).
+func startServerWithThrottle(t *testing.T, th *throttle.Throttle) string {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = server.WithThrottle(ctx, th)
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(ctx, l) }()
 	t.Cleanup(func() {

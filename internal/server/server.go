@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"net"
+
+	"github.com/ht4w5/gen204/internal/throttle"
 )
 
 // response204 is the fixed 204 Response: a 204 status line, Connection:
@@ -22,10 +24,23 @@ var requestTerminator = []byte("\r\n\r\n")
 // connection before responding anyway.
 const drainCap = 8 << 10
 
+// throttleKey carries the aggregate traffic limit through the serve
+// context.
+type throttleKey struct{}
+
+// WithThrottle returns a copy of ctx whose Serve holds every 204
+// Response until t releases a response slot — the traffic limit's
+// throttling. A nil t, or a context without one, serves with no traffic
+// limit.
+func WithThrottle(ctx context.Context, t *throttle.Throttle) context.Context {
+	return context.WithValue(ctx, throttleKey{}, t)
+}
+
 // Serve accepts connections on l and answers each one with a single 204
 // Response followed by a close. It serves until ctx is cancelled or Accept
 // fails; on cancellation Serve closes l and returns nil.
 func Serve(ctx context.Context, l net.Listener) error {
+	th, _ := ctx.Value(throttleKey{}).(*throttle.Throttle)
 	served := make(chan struct{})
 	defer close(served)
 	go func() {
@@ -43,14 +58,18 @@ func Serve(ctx context.Context, l net.Listener) error {
 			}
 			return err
 		}
-		go serveConn(c)
+		go serveConn(c, th)
 	}
 }
 
-// serveConn drains the client's bytes and then sends the 204 Response.
-func serveConn(c net.Conn) {
+// serveConn drains the client's bytes, waits for the traffic limit to
+// release a response slot (throttling), and then sends the 204 Response.
+func serveConn(c net.Conn, th *throttle.Throttle) {
 	defer c.Close()
 	drain(c)
+	if th != nil {
+		th.Wait()
+	}
 	c.Write(response204)
 }
 
